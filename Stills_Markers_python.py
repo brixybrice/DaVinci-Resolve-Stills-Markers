@@ -64,6 +64,16 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "Pillow"])
     from PIL import Image, ImageDraw, ImageFont
 
+try:
+    _hdr_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    if _hdr_dir not in sys.path:
+        sys.path.insert(0, _hdr_dir)
+    from Stills_Marker_python_settings import hdr_converter
+    HDR_AVAILABLE = True
+except Exception:
+    hdr_converter = None
+    HDR_AVAILABLE = False
+
 
 class SMPTE(object):
     # Converts frames to SMPTE timecode of arbitrary frame rate and back.
@@ -567,7 +577,9 @@ dict_settings = {
     "rename_fallback_shot_from_scene": True,
     "rename_scene_shot_separator": "/",
     "burnin": False,
-    "fit_to_1920_canvas": False
+    "fit_to_1920_canvas": False,
+    "hdr_enabled": False,
+    "hdr_color_tag": hdr_converter.BT_2100_PQ if HDR_AVAILABLE else "HDR BT.2100 PQ",
 }
 
 
@@ -1210,7 +1222,7 @@ def show_alert(message):
 
     win = dispatcher.AddWindow(
         {"ID": win_id, "WindowTitle": "Stills Markers", "Dialog": True,
-         "MinimumSize": [380, 120]},
+         "MinimumSize": [400, 120]},
         ui.VGroup({"Spacing": 12, "Weight": 1}, [
             ui.Label({"Text": message, "Alignment": {"AlignHCenter": True,
                                                       "AlignVCenter": True}, "WordWrap": True,
@@ -1476,6 +1488,9 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
     compress_setting_boxID = "CompressSettings"
     compress_check_boxID = "CompressCheckBox"
 
+    hdr_check_boxID       = "HdrCheckBox"
+    hdr_color_tag_comboID = "HdrColorTagCombo"
+
     cancel_buttonID = "CancelButton"
     start_buttonID = "StartButton"
 
@@ -1504,7 +1519,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
             "WindowTitle": win_name,
             "WindowFlags": window_flags,
             "WindowModality": "ApplicationModal",
-            "FixedSize": [600, 380],
+            "FixedSize": [600, 400],
             "Events": {"Close": True, "KeyPress": True},
         },
         ui.VGroup(
@@ -1544,9 +1559,8 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
                         ui.Label({"Weight": 1, "ID": info_labelID}),
                     ],
                 ),
-                ui.VGap(6),
+                ui.VGap(2),
                 hline(1),
-                ui.VGap(4),
                 # ── Rename ───────────────────────────────────────────────
                 ui.HGroup(
                     {"Weight": 0, "Spacing": 10},
@@ -1577,6 +1591,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
                                 "MaximumSize": [70, 16777215],
                             }
                         ),
+                        ui.HGap(20),
                     ],
                 ),
                 ui.VGroup(
@@ -1613,13 +1628,13 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
                                         "MaximumSize": [60, 16777215],
                                     }
                                 ),
+                                ui.HGap(35),
                             ],
                         )
                     ],
                 ),
-                ui.VGap(4),
+                ui.VGap(2),
                 hline(1),
-                ui.VGap(4),
                 # ── Export ───────────────────────────────────────────────
                 ui.HGroup(
                     {"Weight": 0, "Spacing": 10},
@@ -1798,6 +1813,23 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
                                 ui.HGap(0, 1),
                             ],
                         ),
+                        # HDR export
+                        ui.HGroup(
+                            {"Weight": 0, "Spacing": 10},
+                            [
+                                ui.CheckBox(
+                                    {
+                                        "Weight": 0,
+                                        "ID": hdr_check_boxID,
+                                        "Text": "HDR Export",
+                                        "Checked": settings.get("hdr_enabled", False),
+                                        "Events": {"Toggled": True},
+                                    }
+                                ),
+                                ui.ComboBox({"Weight": 0, "ID": hdr_color_tag_comboID}),
+                                ui.HGap(0, 1),
+                            ],
+                        ),
                     ],
                 ),
                 ui.VGap(2),
@@ -1873,6 +1905,12 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
         compress_enabled = export_on and (settings["format"] == "jpg") and detect_system_and_image_optim_installed()
         window_items[compress_check_boxID].Enabled = compress_enabled
 
+        # HDR : PNG uniquement (CICP chunk), disponible si le module est chargé
+        png_selected = settings["format"] == "png"
+        window_items[hdr_check_boxID].Enabled = export_on and HDR_AVAILABLE and png_selected
+        hdr_on = HDR_AVAILABLE and export_on and png_selected and window_items[hdr_check_boxID].Checked
+        window_items[hdr_color_tag_comboID].Enabled = hdr_on
+
         rename_on = window_items[rename_with_meta_check_boxID].Checked
         window_items[rename_options_groupID].Enabled = rename_on
         window_items[rename_format_combo_boxID].Enabled = rename_on
@@ -1907,6 +1945,10 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
         window_items[rename_format_combo_boxID].AddItem("EU")
         window_items[rename_format_combo_boxID].CurrentText = settings.get("rename_format_style", "EU")
 
+        # HDR comboboxes
+        if HDR_AVAILABLE:
+            window_items[hdr_color_tag_comboID].AddItems(hdr_converter.COLOR_TAGS)
+            window_items[hdr_color_tag_comboID].CurrentText = settings.get("hdr_color_tag", hdr_converter.BT_2100_PQ)
         update_controls()
 
     initialize_controls()
@@ -1965,6 +2007,9 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
         settings["burnin"] = window_items[burnin_check_boxID].Checked
         settings["fit_to_1920_canvas"] = window_items[fit_canvas_check_boxID].Checked
 
+        settings["hdr_enabled"] = HDR_AVAILABLE and window_items[hdr_check_boxID].Checked
+        settings["hdr_color_tag"] = window_items[hdr_color_tag_comboID].CurrentText
+
         save_settings_to_json(settings)
         dispatcher.ExitLoop(True)
 
@@ -2003,6 +2048,8 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
     main_window.On[compress_check_boxID].Toggled = OnGenericToggled
     main_window.On[burnin_check_boxID].Toggled = OnGenericToggled
     main_window.On[fit_canvas_check_boxID].Toggled = OnGenericToggled
+    main_window.On[hdr_check_boxID].Toggled = OnGenericToggled
+    main_window.On[hdr_color_tag_comboID].CurrentIndexChanged = OnGenericToggled
 
     main_window.On[cancel_buttonID].Clicked = OnCancelButtonClicked
     main_window.On[start_buttonID].Clicked = OnStartButtonClicked
@@ -2274,6 +2321,16 @@ if grab_stills:
                             burnin_cfg=burnin_web_settings,
                             out_path=img_path
                         )
+
+                    # Optional HDR CICP tagging (PNG only, after burnin)
+                    if settings.get("hdr_enabled") and HDR_AVAILABLE and img_path.lower().endswith(".png"):
+                        try:
+                            hdr_converter.process_still(
+                                img_path,
+                                settings.get("hdr_color_tag", hdr_converter.BT_2100_PQ),
+                            )
+                        except Exception as hdr_err:
+                            print(f"HDR tagging failed for {img_path}: {hdr_err}")
 
                     # Register filename in JSON
                     meta_block["exported_filename"] = os.path.basename(img_path)
