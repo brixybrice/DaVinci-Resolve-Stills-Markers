@@ -53,6 +53,8 @@ import subprocess
 import sys, time
 import json
 import re
+import shutil
+import tempfile
 from datetime import datetime
 
 try:
@@ -880,6 +882,7 @@ dict_settings = {
     "create_export_folder_timeline_name": True,
     "create_sub_folder": True,
     "sub_folder_name": "Stills",
+    "sub_folder_append_timeline_name": False,
     "open_gate_crop": False,
     "compress": False,
     "compress_mode": "none",
@@ -1774,6 +1777,55 @@ def export_stills_and_get_new_files(still_album, stills_list, output_path, prefi
     return True, [os.path.join(output_path, f) for f in new_files]
 
 
+def _still_fingerprint(still_album, still):
+    """Export one still to a throwaway folder and return a small RGB thumbnail as bytes (None on failure)."""
+    tmp = tempfile.mkdtemp(prefix="stills_markers_fp_")
+    try:
+        still_album.ExportStills([still], tmp, "", "jpg")
+        imgs = [f for f in os.listdir(tmp) if f.lower().endswith(".jpg")]
+        if not imgs:
+            return None
+        with Image.open(os.path.join(tmp, imgs[0])) as im:
+            return im.convert("RGB").resize((64, 36)).tobytes()
+    except Exception as e:
+        print(f"[dupe_check] fingerprint failed: {e}")
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _wait_for_playhead(timeline, tc, timeout=2.0, settle=0.3):
+    """Wait until Resolve reports the playhead on tc, then give the viewer time to redraw."""
+    want = tc.replace(";", ":")
+    end = time.time() + timeout
+    while time.time() < end and (timeline.GetCurrentTimecode() or "").replace(";", ":") != want:
+        time.sleep(0.05)
+    time.sleep(settle)
+
+
+def grab_still_checked(timeline, gallery, still_album, tc, prev_fp,
+                       retry_waits=(0.5, 1.0, 2.0), fingerprint=_still_fingerprint):
+    """Grab a still at tc; if it matches the previous marker's still (viewer not refreshed yet),
+    delete it and grab again after a longer wait. Returns (still, fingerprint, still_suspect)."""
+    _wait_for_playhead(timeline, tc)
+    still, fp = None, None
+    for attempt in range(len(retry_waits) + 1):
+        if attempt:
+            still_album.DeleteStills([still])
+            print(f"[dupe_check] {tc}: still identical to previous marker, retry {attempt} in {retry_waits[attempt - 1]}s")
+            timeline.SetCurrentTimecode(tc)
+            time.sleep(retry_waits[attempt - 1])
+        gallery.SetCurrentStillAlbum(still_album)
+        still = timeline.GrabStill()
+        if not still:
+            return None, prev_fp, False
+        fp = fingerprint(still_album, still)
+        if fp is None or prev_fp is None or fp != prev_fp:
+            return still, fp, False
+    print(f"[dupe_check] {tc}: still identical to previous marker after {len(retry_waits)} retries, kept")
+    return still, fp, True
+
+
 def parse_resolution_str(res_str):
     """
     Convertit "1920x1080" en (1920,1080). Retourne (None, None) si inconnu.
@@ -1971,6 +2023,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
     create_timeline_folder_check_boxID = "CreateTimelineFolderCheckBox"
     create_sub_folder_check_boxID = "CreateSubFolderCheckBox"
     sub_folder_name_line_editID = "SubFolderNameLineEdit"
+    sub_folder_timeline_check_boxID = "SubFolderTimelineCheckBox"
 
     resize_check_boxID = "ResizeCheckBox"
     resize_line_editID = "ResizeLineEdit"
@@ -2032,11 +2085,11 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
             "WindowTitle": win_name,
             "WindowFlags": window_flags,
             "WindowModality": "ApplicationModal",
-            "FixedSize": [638, 510],
+            "FixedSize": [638, 535],
             "Events": {"Close": True, "KeyPress": True},
         },
         ui.VGroup(
-            {"MinimumSize": [638, 510], "MaximumSize": [638, 510], "Weight": 1},
+            {"MinimumSize": [638, 535], "MaximumSize": [638, 535], "Weight": 1},
             [
                 ui.HGroup({"Weight": 1, "Spacing": 0}, [
                     ui.HGap(14),
@@ -2267,37 +2320,62 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
                                         ),
                                     ],
                                 ),
-                                # Create folder options
+                                # Create folder options: sub folder column so "Append" lines up under "Create sub folder"
                                 ui.HGroup(
                                     {"Weight": 0, "Spacing": 10},
                                     [
-                                        ui.CheckBox(
-                                            {
-                                                "Weight": 0,
-                                                "ID": create_timeline_folder_check_boxID,
-                                                "Text": "Create Folder with timeline name",
-                                                "Checked": settings["create_export_folder_timeline_name"],
-                                                "Events": {"Toggled": True},
-                                            }
+                                        ui.VGroup(
+                                            {"Weight": 0},
+                                            [
+                                                ui.CheckBox(
+                                                    {
+                                                        "Weight": 0,
+                                                        "ID": create_timeline_folder_check_boxID,
+                                                        "Text": "Create Folder with timeline name",
+                                                        "Checked": settings["create_export_folder_timeline_name"],
+                                                        "Events": {"Toggled": True},
+                                                    }
+                                                ),
+                                                ui.VGap(),
+                                            ],
                                         ),
                                         ui.HGap(60),
-                                        ui.CheckBox(
-                                            {
-                                                "Weight": 0,
-                                                "ID": create_sub_folder_check_boxID,
-                                                "Text": "Create sub folder:",
-                                                "Checked": settings["create_sub_folder"],
-                                                "Events": {"Toggled": True},
-                                            }
-                                        ),
-                                        ui.LineEdit(
-                                            {
-                                                "Weight": 0,
-                                                "ID": sub_folder_name_line_editID,
-                                                "Text": settings["sub_folder_name"],
-                                                "MinimumSize": [100, 0],
-                                                "MaximumSize": [120, 16777215],
-                                            }
+                                        ui.VGroup(
+                                            {"Weight": 0, "Spacing": 4},
+                                            [
+                                                ui.HGroup(
+                                                    {"Weight": 0, "Spacing": 10},
+                                                    [
+                                                        ui.CheckBox(
+                                                            {
+                                                                "Weight": 0,
+                                                                "ID": create_sub_folder_check_boxID,
+                                                                "Text": "Create sub folder:",
+                                                                "Checked": settings["create_sub_folder"],
+                                                                "Events": {"Toggled": True},
+                                                            }
+                                                        ),
+                                                        ui.LineEdit(
+                                                            {
+                                                                "Weight": 0,
+                                                                "ID": sub_folder_name_line_editID,
+                                                                "Text": settings["sub_folder_name"],
+                                                                "MinimumSize": [100, 0],
+                                                                "MaximumSize": [120, 16777215],
+                                                            }
+                                                        ),
+                                                    ],
+                                                ),
+                                                ui.CheckBox(
+                                                    {
+                                                        "Weight": 0,
+                                                        "ID": sub_folder_timeline_check_boxID,
+                                                        "Text": "Append _timeline name to sub folder",
+                                                        "Checked": settings["sub_folder_append_timeline_name"],
+                                                        "Events": {"Toggled": True},
+                                                    }
+                                                ),
+                                            ],
                                         ),
                                     ],
                                 ),
@@ -2487,6 +2565,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
         window_items[create_timeline_folder_check_boxID].Enabled = folder_opts_on
         window_items[create_sub_folder_check_boxID].Enabled = folder_opts_on
         window_items[sub_folder_name_line_editID].Enabled = window_items[create_sub_folder_check_boxID].Checked
+        window_items[sub_folder_timeline_check_boxID].Enabled = window_items[create_sub_folder_check_boxID].Checked
 
         resize_on = window_items[resize_check_boxID].Checked
         window_items[resize_check_boxID].Enabled = export_on
@@ -2617,6 +2696,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
         settings["create_export_folder_timeline_name"] = window_items[create_timeline_folder_check_boxID].Checked
         settings["create_sub_folder"] = window_items[create_sub_folder_check_boxID].Checked
         settings["sub_folder_name"] = window_items[sub_folder_name_line_editID].Text
+        settings["sub_folder_append_timeline_name"] = window_items[sub_folder_timeline_check_boxID].Checked
 
         settings["resize_stills"] = window_items[resize_check_boxID].Checked
         settings["resize_percentage"] = window_items[resize_line_editID].Text
@@ -2666,6 +2746,7 @@ def create_window(marker_count_by_color, markers, still_album_name, timeline_set
     main_window.On[create_timeline_folder_check_boxID].Toggled = OnGenericToggled
     main_window.On[create_sub_folder_check_boxID].Toggled = OnGenericToggled
     main_window.On[sub_folder_name_line_editID].TextChanged = OnGenericToggled
+    main_window.On[sub_folder_timeline_check_boxID].Toggled = OnGenericToggled
 
     main_window.On[resize_check_boxID].Toggled = OnGenericToggled
     main_window.On[resize_line_editID].TextChanged = OnGenericToggled
@@ -2759,6 +2840,7 @@ window.Hide()
 print("launching script main loop and grab_stills is ", grab_stills)
 
 output_path = None  # set here so it survives across both if grab_stills: blocks
+_possible_dupes = []  # timecodes whose still still matched the previous one after all retries
 
 if grab_stills:
     _skip_grab = settings.get("skip_grab", False)
@@ -2843,6 +2925,8 @@ if grab_stills:
         # Sub folder
         if settings.get("create_sub_folder", False):
             subfolder_name = settings.get("sub_folder_name", "").strip()
+            if settings.get("sub_folder_append_timeline_name", False):
+                subfolder_name = "_".join(p for p in (subfolder_name, timeline.GetName().strip()) if p)
             if subfolder_name:
                 output_path = os.path.join(output_path, subfolder_name.replace(" ", "_"))
 
@@ -2961,6 +3045,7 @@ if grab_stills:
         print(f"[skip_grab] Clip map built: {len(_clip_ranges)} clips")
 
     # --- ALWAYS grab stills into gallery and export/burnin in a single pass ---
+    _prev_fp = None  # fingerprint of the previous grab, to catch a viewer that hasn't refreshed yet
     for marker_frame in marker_frames:
         marker = markers_src.get(marker_frame)
         if not marker:
@@ -2987,11 +3072,11 @@ if grab_stills:
         else:
             # Navigate to frame, grab still
             assert timeline.SetCurrentTimecode(tc), f"Couldn't navigate to marker at {tc}"
-            # Re-select album before each grab — page changes can reset Resolve's
-            # active gallery album, causing GrabStill to deposit into the wrong album.
-            gallery.SetCurrentStillAlbum(still_album)
-            _stills_before = still_album.GetStills() or []
-            grabbed = timeline.GrabStill()
+            # Re-select album before each grab (inside grab_still_checked) — page changes can reset
+            # Resolve's active gallery album, causing GrabStill to deposit into the wrong album.
+            grabbed, _prev_fp, _suspect = grab_still_checked(timeline, gallery, still_album, tc, _prev_fp)
+            if _suspect:
+                _possible_dupes.append(tc)
             if not grabbed:
                 restore_page(initial_state)
                 show_alert(
@@ -3000,8 +3085,6 @@ if grab_stills:
                     "Color page (switch from LUT or Media Pool to Gallery), then run the script again."
                 )
                 exit()
-            _stills_after = still_album.GetStills() or []
-            print(f"[grab_debug] album stills before={len(_stills_before)} after={len(_stills_after)} grabbed_in_album={grabbed in _stills_after}")
             meta_block = collect_full_metadata_at_playhead(
                 timeline, marker_offset_frame, frame_rate, drop_frame,
             )
@@ -3592,3 +3675,8 @@ if grab_stills and settings.get("export", False) and settings.get("open_destinat
 
 if initial_state:
     restore_page(initial_state)
+
+if _possible_dupes:
+    show_alert("Possible duplicate stills (identical to the previous marker after 3 retries):\n\n"
+               + "\n".join(_possible_dupes)
+               + "\n\nCheck these markers by hand.")

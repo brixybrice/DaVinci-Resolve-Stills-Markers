@@ -1,3 +1,5 @@
 .gitignore
 .idea
 CLAUDE.md
+
+__pycache__/

@@ -44,7 +44,7 @@ Stills_Marker_python_settings/
 | 3120–3284 | **Boucle principale** : grab, metadata, export, crop, burnin, resize, tag sRGB, rename |
 | 3284–3593 | Post-boucle : rename markers, move markers, EDL, JSON, DRX cleanup, Finder, ImageOptim |
 
-## UI — layout actuel (638 × 510 px)
+## UI — layout actuel (638 × 535 px)
 
 ```
 [MarkerSource combo] [Color label] [Color combo] [Restrict to In/Out]
@@ -59,6 +59,7 @@ Stills_Marker_python_settings/
   └─ ExportSettings (enabled si export=True) :
        [path LineEdit] [Browse]
        [Create Folder with timeline name] [Create sub folder:] [input]
+                                           [Append _timeline name to sub folder]
        [Replace stills] [Resize stills in %] [input] [%] [Remove DRX files] [Tag sRGB (Rec.709 match)]
        [Fit to FHD canvas] [Burnins] [compress combo]
 [Open destination folder]
@@ -81,6 +82,7 @@ restrict_to_in_out
 remove_drx
 create_export_folder_timeline_name   # crée un dossier nommé par la timeline SUR DISQUE
 create_sub_folder / sub_folder_name
+sub_folder_append_timeline_name # ajoute _<timeline> au nom du sous-dossier (Stills -> Stills_MyTimeline)
 open_gate_crop                  # "Framelines Crop" checkbox
 compress / compress_mode        # "none"|"background"|"app" (ImageOptim)
 marker_source                   # "timeline"|"clip"|"both"
@@ -104,6 +106,11 @@ use_active_gallery_album        # utilise l'album gallery actif au lieu de crée
 - La création de l'album est **différée** au clic Start pour éviter les albums orphelins.
 - `GrabStill()` nécessite que le panneau Gallery soit visible dans la page Color (pas LUT, pas Media Pool). Si ça échoue, une alerte guide l'utilisateur.
 - L'API Resolve n'expose pas de méthode pour switcher les panneaux internes de la page Color → on tente `gallery.SetCurrentStillAlbum()` avant la boucle et on affiche une alerte explicite si `GrabStill()` retourne `False`.
+
+### Stills dupliqués (viewer en retard)
+- Sur média lourd, `GrabStill()` juste après `SetCurrentTimecode()` capturait l'image encore affichée (marker précédent).
+- `grab_still_checked()` : attend que `GetCurrentTimecode()` == TC du marker + 0.3 s, exporte le still dans un dossier temp, compare une miniature 64x36 RGB au still précédent. Identique → `DeleteStills` + re-grab après 0.5 / 1 / 2 s. Toujours identique → gardé et listé dans une alerte en fin de run.
+- Test sans Resolve : `python3 tests/test_grab_still_checked.py`.
 
 ### skip_grab + relink JSON
 - Quand `skip_grab=True`, aucun still n'est grabé, mais les métadonnées sont collectées pour chaque frame de marker.
